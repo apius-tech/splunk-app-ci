@@ -57,10 +57,13 @@ on:
         description: >-
           Comma-separated Splunk versions the release is compatible with, sent
           as the Splunkbase Release API `splunk_versions` field (required by
-          the API).
-        required: false
+          the API). No default: every caller must declare its own real
+          compatibility explicitly. A blanket fleet default is unsafe -- it
+          would silently claim support for versions the app has not been
+          validated against (e.g. Splunk 9.0/9.1 ship Python 3.7) and omit
+          newer 10.x releases.
+        required: true
         type: string
-        default: "9.0,9.1,9.2,9.3,9.4"
       cim_versions:
         description: >-
           Optional comma-separated CIM versions, sent as the `cim_versions`
