@@ -13,8 +13,11 @@ name: release
 # hardcoded true), while the cloud step is made advisory via step-level
 # continue-on-error unless cloud_gate is set.
 #
-# Splunkbase upload is deliberately out of scope here (that is slice #6); this
-# workflow stops after the GitHub Release step.
+# After the GitHub Release, an optional gated `splunkbase` job publishes the
+# same package to Splunkbase (ADR-0006, slice #6). It runs inside the caller
+# repo's `splunkbase` Environment, so a required reviewer there is the manual
+# approval gate. It is skipped entirely when `splunkbase_app_id` is empty (no
+# listing yet) so the pipeline stays green and the first publish stays manual.
 #
 # Human release flow (see also prepare-release.yml):
 #   1. Dispatch prepare-release with the target version; merge the "Release
@@ -41,12 +44,43 @@ on:
         required: false
         type: string
         default: "3.9"
+      splunkbase_app_id:
+        description: >-
+          Numeric Splunkbase app id (listing) to publish to. Empty (the
+          default) skips the Splunkbase publish job entirely: an app with no
+          listing yet does not fail the pipeline, and its first publish is done
+          manually to create the listing.
+        required: false
+        type: string
+        default: ""
+      splunk_versions:
+        description: >-
+          Comma-separated Splunk versions the release is compatible with, sent
+          as the Splunkbase Release API `splunk_versions` field (required by
+          the API).
+        required: false
+        type: string
+        default: "9.0,9.1,9.2,9.3,9.4"
+      cim_versions:
+        description: >-
+          Optional comma-separated CIM versions, sent as the `cim_versions`
+          field. Omitted from the upload when empty.
+        required: false
+        type: string
+        default: ""
+      visibility:
+        description: >-
+          Splunkbase release `visibility` flag. When true, the approved release
+          is made publicly visible on the listing.
+        required: false
+        type: string
+        default: "true"
     secrets:
       SPLUNK_USER:
-        description: "splunk.com service-account user for the AppInspect API."
+        description: "splunk.com service-account user for the AppInspect and Splunkbase Release APIs."
         required: true
       SPLUNK_PASS:
-        description: "splunk.com service-account password for the AppInspect API."
+        description: "splunk.com service-account password for the AppInspect and Splunkbase Release APIs."
         required: true
 
 permissions:
@@ -130,3 +164,141 @@ jobs:
           dist/*.tar.gz
           --title "v${{ inputs.version }}"
           --generate-notes
+
+  # Gated Splunkbase publish (ADR-0006, slice #6). Runs only after the GitHub
+  # Release job and only when a listing exists (splunkbase_app_id is set).
+  #
+  # The manual gate: `environment: splunkbase` is resolved against the CALLER
+  # repo, whose `splunkbase` Environment has a required reviewer. GitHub holds
+  # this job (before any step runs) until a reviewer approves, and the publish
+  # credentials are scoped to that environment in the caller.
+  #
+  # The "no listing yet -> skip, don't fail" guard is the job-level `if`: when
+  # splunkbase_app_id is empty the whole job is skipped, so the pipeline stays
+  # green AND no reviewer is asked to approve a no-op. The first step re-states
+  # the target for the log and hard-stops with guidance if it is somehow reached
+  # empty. Only the read-only status poll loops; the upload POSTs exactly once
+  # to respect the Release API limit of <=20 POST/hour.
+  splunkbase:
+    needs: release
+    if: ${{ inputs.splunkbase_app_id != '' }}
+    runs-on: ubuntu-latest
+    environment: splunkbase
+    steps:
+      - name: Confirm Splunkbase target
+        run: |
+          if [ -z "${{ inputs.splunkbase_app_id }}" ]; then
+            echo "No SPLUNKBASE_APP_ID set — first publish is manual; skipping Splunkbase upload."
+            echo "Create the Splunkbase listing manually, then set the SPLUNKBASE_APP_ID repo variable."
+            exit 1
+          fi
+          echo "Publishing ${{ inputs.app_id }}-${{ inputs.version }} to Splunkbase app id ${{ inputs.splunkbase_app_id }} (pending environment approval)."
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Fetch packaging tooling
+        uses: actions/checkout@v4
+        with:
+          repository: apius-tech/splunk-app-ci
+          ref: main
+          path: .splunk-app-ci
+
+      # Rebuild the exact same Splunkbase artifact the GitHub Release job built.
+      - name: Build package
+        run: >
+          PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package
+          --app-dir "${{ inputs.app_id }}"
+          --version "${{ inputs.version }}"
+          --dest dist
+
+      # Upload via the Splunkbase Release API (new_release) with HTTP Basic auth,
+      # then poll the package status endpoint until it reports pass/fail.
+      - name: Upload to Splunkbase and poll status
+        env:
+          SPLUNK_USER: ${{ secrets.SPLUNK_USER }}
+          SPLUNK_PASS: ${{ secrets.SPLUNK_PASS }}
+          SB_APP_ID: ${{ inputs.splunkbase_app_id }}
+          APP_ID: ${{ inputs.app_id }}
+          VERSION: ${{ inputs.version }}
+          SPLUNK_VERSIONS: ${{ inputs.splunk_versions }}
+          CIM_VERSIONS: ${{ inputs.cim_versions }}
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          set -euo pipefail
+
+          tarball="dist/${APP_ID}-${VERSION}.tar.gz"
+          if [ ! -f "$tarball" ]; then
+            echo "Expected package not found: $tarball" >&2
+            ls -la dist >&2 || true
+            exit 1
+          fi
+          echo "Uploading $tarball to Splunkbase app ${SB_APP_ID}."
+
+          # splunk_versions and visibility are required; cim_versions is sent
+          # only when provided.
+          form_args=(
+            -F "files[]=@${tarball}"
+            -F "filename=$(basename "$tarball")"
+            -F "splunk_versions=${SPLUNK_VERSIONS}"
+            -F "visibility=${VISIBILITY}"
+          )
+          if [ -n "${CIM_VERSIONS}" ]; then
+            form_args+=(-F "cim_versions=${CIM_VERSIONS}")
+          fi
+
+          # Single POST only — the Release API allows <=20 POST/hour, so the
+          # upload is never retried; only the read-only GET poll loops below.
+          body="$(mktemp)"
+          code="$(curl -sS -o "$body" -w '%{http_code}' \
+            -u "${SPLUNK_USER}:${SPLUNK_PASS}" \
+            --request POST \
+            "https://splunkbase.splunk.com/api/v1/app/${SB_APP_ID}/new_release/" \
+            "${form_args[@]}")"
+
+          echo "new_release HTTP ${code}"
+          cat "$body"; echo
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then
+            echo "Splunkbase upload failed (HTTP ${code})." >&2
+            exit 1
+          fi
+
+          # The new_release response may already carry result=pass and always
+          # carries a package/release id used by the status endpoint.
+          result="$(jq -r '.result // empty' "$body" 2>/dev/null || true)"
+          pkg_id="$(jq -r '(.id // .package_id // .message.release_file // "") | tostring' "$body" 2>/dev/null || true)"
+          echo "Upload result='${result:-}' package id='${pkg_id:-}'"
+
+          case "$result" in
+            pass) echo "Splunkbase reported pass on upload."; exit 0 ;;
+            fail|error) echo "Splunkbase reported '${result}' on upload." >&2; exit 1 ;;
+          esac
+
+          if [ -z "${pkg_id}" ] || [ "${pkg_id}" = "null" ]; then
+            echo "No package id returned and no pass result — cannot confirm publish." >&2
+            exit 1
+          fi
+
+          # Poll the read-only package status endpoint until pass/fail. GETs are
+          # not subject to the POST rate limit; the loop is bounded so it never
+          # hangs (20 * 30s ~= 10 min).
+          status_url="https://splunkbase.splunk.com/api/v1/package/${pkg_id}/"
+          for attempt in $(seq 1 20); do
+            sleep 30
+            s_body="$(curl -sS -u "${SPLUNK_USER}:${SPLUNK_PASS}" "$status_url" || true)"
+            status="$(printf '%s' "$s_body" | jq -r '.status // .result // empty' 2>/dev/null || true)"
+            echo "poll ${attempt}/20: status='${status:-unknown}'"
+            case "$status" in
+              pass|success|approved|complete|completed)
+                echo "Splunkbase publish succeeded."; exit 0 ;;
+              fail|failed|error|rejected)
+                echo "Splunkbase publish failed: ${s_body}" >&2; exit 1 ;;
+            esac
+          done
+          echo "Timed out waiting for Splunkbase to finish validating the release." >&2
+          exit 1
