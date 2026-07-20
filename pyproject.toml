@@ -1,0 +1,23 @@
+[project]
+name = "splunk-app-ci"
+description = "Shared CI/CD tooling for Apius Splunk apps: version stamping and Splunkbase packaging"
+authors = [
+    { name = "Patryk Bujna", email = "patryk.bujna@apius.pl" },
+]
+license = "MIT"
+requires-python = ">=3.9"
+version = "0.0.0"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+# Canonical ruff configuration for Apius Splunk apps.
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

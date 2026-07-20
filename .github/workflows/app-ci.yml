@@ -1,0 +1,66 @@
+name: app-ci
+
+# Reusable PR gate for Apius Splunk apps: ruff lint/format, optional pytest,
+# and Splunk AppInspect (cloud tags) against the app directory. Callers pass
+# their app id (== the app directory name) and, optionally, a Python version.
+on:
+  workflow_call:
+    inputs:
+      app_id:
+        description: "Splunk app id; also the app directory to run AppInspect against."
+        required: true
+        type: string
+      python_version:
+        description: "Python version used for the ruff/pytest tooling."
+        required: false
+        type: string
+        default: "3.9"
+
+jobs:
+  pr-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install tooling
+        run: pip install "ruff==0.15.21" "pytest>=8"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Tests
+        run: |
+          if [ -d tests ]; then
+            pytest -q
+          else
+            echo "No tests/ directory found; skipping pytest."
+          fi
+
+      # AppInspect runs on the app directory (no tarball at PR time; packaging
+      # stays a release-time concern). This is the fast base-check PR gate:
+      # standard checks run and block on errors/failures. Cloud vetting is a
+      # release-time API concern (advisory) and is deliberately NOT run here.
+      # Manual checks are excluded so a well-formed app PR passes the gate.
+      - name: AppInspect (base checks)
+        uses: splunk/appinspect-cli-action@v2.13.0
+        with:
+          app_path: ${{ inputs.app_id }}
+          excluded_tags: manual
+          result_file: appinspect_result.json
+
+      - name: Upload AppInspect report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appinspect-report
+          path: appinspect_result.json
+          if-no-files-found: warn
