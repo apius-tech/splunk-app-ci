@@ -45,15 +45,29 @@ jobs:
             echo "No tests/ directory found; skipping pytest."
           fi
 
-      # AppInspect runs on the app directory (no tarball at PR time; packaging
-      # stays a release-time concern). This is the fast base-check PR gate:
-      # standard checks run and block on errors/failures. Cloud vetting is a
-      # release-time API concern (advisory) and is deliberately NOT run here.
-      # Manual checks are excluded so a well-formed app PR passes the gate.
+      # AppInspect needs a package tarball, not the source directory: the
+      # appinspect-cli-action globs app_path/* and inspects the first entry.
+      # We build a throwaway package (version 0.0.0 is a non-release
+      # placeholder; the tarball is only for inspection) into dist/ and point
+      # AppInspect at that directory so it picks up the single tarball.
+      - name: Fetch packaging tooling
+        uses: actions/checkout@v4
+        with:
+          repository: apius-tech/splunk-app-ci
+          ref: main
+          path: .splunk-app-ci
+
+      - name: Build package for inspection
+        run: PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package --app-dir "${{ inputs.app_id }}" --version 0.0.0 --dest dist
+
+      # This is the fast base-check PR gate: standard checks run and block on
+      # errors/failures. Cloud vetting is a release-time API concern (advisory)
+      # and is deliberately NOT run here. Manual checks are excluded so a
+      # well-formed app PR passes the gate.
       - name: AppInspect (base checks)
         uses: splunk/appinspect-cli-action@v2.13.0
         with:
-          app_path: ${{ inputs.app_id }}
+          app_path: dist
           excluded_tags: manual
           result_file: appinspect_result.json
 
