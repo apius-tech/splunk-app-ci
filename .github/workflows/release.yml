@@ -1,0 +1,132 @@
+name: release
+
+# Reusable release/publish workflow for Apius Splunk apps (ADR-0004 / ADR-0005).
+# Triggered by a caller on a pushed tag vX.Y.Z (on the merged release commit),
+# it builds the Splunkbase package at the released version, runs Splunk
+# AppInspect via the AppInspect API, and publishes a GitHub Release with the
+# packaged .tar.gz and auto-generated notes.
+#
+# AppInspect (ADR-0005): base (non-cloud) errors/failures BLOCK the release;
+# cloud findings are ADVISORY by default and only block when cloud_gate=true.
+# The base and cloud vettings run as two steps so blocking can be controlled
+# per-tag-set: the base step always blocks (the action's failOnError is
+# hardcoded true), while the cloud step is made advisory via step-level
+# continue-on-error unless cloud_gate is set.
+#
+# Splunkbase upload is deliberately out of scope here (that is slice #6); this
+# workflow stops after the GitHub Release step.
+#
+# Human release flow (see also prepare-release.yml):
+#   1. Dispatch prepare-release with the target version; merge the "Release
+#      vX.Y.Z" PR so main shows the released version.
+#   2. Push the tag vX.Y.Z on the merged commit -> this workflow runs.
+on:
+  workflow_call:
+    inputs:
+      app_id:
+        description: "Splunk app id; also the app directory to package/inspect."
+        required: true
+        type: string
+      version:
+        description: "Release version X.Y.Z (no leading v; caller strips it from the tag)."
+        required: true
+        type: string
+      cloud_gate:
+        description: "When true, AppInspect cloud findings block the release; otherwise advisory."
+        required: false
+        type: boolean
+        default: false
+      python_version:
+        description: "Python version used for the packaging tooling."
+        required: false
+        type: string
+        default: "3.9"
+    secrets:
+      SPLUNK_USER:
+        description: "splunk.com service-account user for the AppInspect API."
+        required: true
+      SPLUNK_PASS:
+        description: "splunk.com service-account password for the AppInspect API."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Fetch packaging tooling
+        uses: actions/checkout@v4
+        with:
+          repository: apius-tech/splunk-app-ci
+          ref: main
+          path: .splunk-app-ci
+
+      # Build the Splunkbase artifact at the released version into dist/. The
+      # AppInspect API action globs the directory, so dist/ holds only this
+      # single tarball.
+      - name: Build package
+        run: >
+          PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package
+          --app-dir "${{ inputs.app_id }}"
+          --version "${{ inputs.version }}"
+          --dest dist
+
+      # Base (non-cloud) vetting. failOnError is hardcoded true in the action,
+      # so any error/failure here BLOCKS the release.
+      - name: AppInspect API (base checks, blocking)
+        uses: splunk/appinspect-api-action@v3.0.5
+        with:
+          username: ${{ secrets.SPLUNK_USER }}
+          password: ${{ secrets.SPLUNK_PASS }}
+          app_path: dist
+          excluded_tags: "manual,cloud"
+
+      - name: Upload base AppInspect report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appinspect-base-report
+          path: AppInspect_response.html
+          if-no-files-found: warn
+
+      # Cloud vetting. included_tags: cloud runs only the cloud checks. The
+      # step is advisory (continue-on-error) unless cloud_gate is true, in
+      # which case cloud findings block the release.
+      - name: AppInspect API (cloud vetting, advisory unless cloud_gate)
+        continue-on-error: ${{ !inputs.cloud_gate }}
+        uses: splunk/appinspect-api-action@v3.0.5
+        with:
+          username: ${{ secrets.SPLUNK_USER }}
+          password: ${{ secrets.SPLUNK_PASS }}
+          app_path: dist
+          included_tags: cloud
+
+      - name: Upload cloud AppInspect report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appinspect-cloud-report
+          path: AppInspect_response.html
+          if-no-files-found: warn
+
+      # Publish the GitHub Release for the pushed tag with the packaged
+      # artifact and auto-generated notes. Reached only when the base checks
+      # (and, under cloud_gate, cloud checks) passed.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "v${{ inputs.version }}"
+          dist/*.tar.gz
+          --title "v${{ inputs.version }}"
+          --generate-notes
