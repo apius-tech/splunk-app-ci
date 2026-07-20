@@ -1,0 +1,92 @@
+name: prepare-release
+
+# Reusable release-preparation workflow for Apius Splunk apps (ADR-0004:
+# commit-back release-PR flow). It stamps the target version into the two
+# source-of-truth files -- app.conf [launcher] version and the root
+# pyproject.toml [project].version -- on a release/vX.Y.Z branch, then opens a
+# "Release vX.Y.Z" PR against main. It never writes to main directly; opening
+# the PR runs the normal PR gate (ci.yml). A human reviews and merges the PR so
+# main always shows the released version.
+#
+# Human release flow (see also release.yml):
+#   1. Dispatch the caller prepare-release workflow with the target version.
+#   2. This workflow opens the "Release vX.Y.Z" PR; review and merge it.
+#   3. Push the tag vX.Y.Z on the merged commit.
+#   4. The release workflow (release.yml) packages, runs AppInspect and
+#      publishes the GitHub Release.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version X.Y.Z (no leading v)."
+        required: true
+        type: string
+      app_id:
+        description: "Splunk app id; also the app directory containing default/app.conf."
+        required: true
+        type: string
+      python_version:
+        description: "Python version used for the stamping tooling."
+        required: false
+        type: string
+        default: "3.9"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Fetch packaging tooling
+        uses: actions/checkout@v4
+        with:
+          repository: apius-tech/splunk-app-ci
+          ref: main
+          path: .splunk-app-ci
+
+      # Stamp both source-of-truth files in place so the repo always shows the
+      # released version once the PR merges (ADR-0004).
+      - name: Stamp version into app.conf + pyproject.toml
+        run: >
+          PYTHONPATH=.splunk-app-ci python -m splunk_app_ci stamp
+          --version "${{ inputs.version }}"
+          --app-conf "${{ inputs.app_id }}/default/app.conf"
+          --pyproject pyproject.toml
+
+      - name: Configure git identity
+        run: |
+          git config user.name "Patryk Bujna"
+          git config user.email "patryk.bujna@apius.pl"
+
+      # Commit only the two stamped files onto a release branch and open the PR.
+      # The .splunk-app-ci checkout is intentionally not staged.
+      - name: Commit and open release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="release/v${{ inputs.version }}"
+          git checkout -b "$branch"
+          git add "${{ inputs.app_id }}/default/app.conf" pyproject.toml
+          git commit -m "Release v${{ inputs.version }}: stamp app.conf + pyproject version"
+          git push -u origin "$branch"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Release v${{ inputs.version }}" \
+            --body "Automated release preparation for v${{ inputs.version }} (ADR-0004).
+
+          Stamps to v${{ inputs.version }}:
+          - \`${{ inputs.app_id }}/default/app.conf\` \`[launcher] version\`
+          - root \`pyproject.toml\` \`[project].version\`
+
+          After merge, push the tag \`v${{ inputs.version }}\` on the merged commit to trigger the release workflow (package -> AppInspect API -> GitHub Release)."
