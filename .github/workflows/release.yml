@@ -1,10 +1,16 @@
 name: release
 
 # Reusable release/publish workflow for Apius Splunk apps (ADR-0004 / ADR-0005).
-# Triggered by a caller on a pushed tag vX.Y.Z (on the merged release commit),
-# it builds the Splunkbase package at the released version, runs Splunk
+# It builds the Splunkbase package at the released version, runs Splunk
 # AppInspect via the AppInspect API, and publishes a GitHub Release with the
 # packaged .tar.gz and auto-generated notes.
+#
+# Callers trigger it either way (see the `resolve` job):
+#   * auto (preferred) — on push to main, omitting `version`. The merged Release
+#     PR is the trigger, the version comes from the stamped app.conf, and the
+#     tag is created here by `gh release create --target`. No manual tag push,
+#     and no PAT: a tag pushed with GITHUB_TOKEN would not trigger a workflow.
+#   * tag (legacy) — on a pushed vX.Y.Z tag, passing the stripped version.
 #
 # AppInspect (ADR-0005): base (non-cloud) errors/failures BLOCK the release;
 # cloud findings are ADVISORY by default and only block when cloud_gate=true.
@@ -19,10 +25,10 @@ name: release
 # approval gate. It is skipped entirely when `splunkbase_app_id` is empty (no
 # listing yet) so the pipeline stays green and the first publish stays manual.
 #
-# Human release flow (see also prepare-release.yml):
-#   1. Dispatch prepare-release with the target version; merge the "Release
-#      vX.Y.Z" PR so main shows the released version.
-#   2. Push the tag vX.Y.Z on the merged commit -> this workflow runs.
+# Human release flow, auto trigger (see also prepare-release.yml):
+#   1. Dispatch prepare-release with the target version.
+#   2. Merge the "Release vX.Y.Z" PR -> this workflow runs, tags, releases.
+#   3. Approve the `splunkbase` deployment to publish (or leave it unapproved).
 on:
   workflow_call:
     inputs:
@@ -31,8 +37,13 @@ on:
         required: true
         type: string
       version:
-        description: "Release version X.Y.Z (no leading v; caller strips it from the tag)."
-        required: true
+        description: >-
+          Release version X.Y.Z (no leading v). Optional: when empty the version
+          is read from the app's stamped app.conf [launcher] version, which is
+          what the auto trigger (caller on push to main) uses. Tag-triggered
+          callers pass the version stripped from the tag name.
+        required: false
+        default: ""
         type: string
       cloud_gate:
         description: "When true, AppInspect cloud findings block the release; otherwise advisory."
@@ -90,7 +101,72 @@ permissions:
   contents: write
 
 jobs:
+  # Resolve the version to release and decide whether there is anything to do.
+  #
+  # Two trigger shapes are supported so apps can migrate independently:
+  #   * auto (preferred)  — caller runs on push to main and omits `version`.
+  #     The version comes from the stamped app.conf, and the release is skipped
+  #     unless that version has no tag yet, so ordinary main pushes are no-ops
+  #     and a re-run cannot double-release.
+  #   * tag (legacy)      — caller runs on a pushed vX.Y.Z tag and passes the
+  #     stripped version. Always releases; the tag already exists.
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      should_release: ${{ steps.resolve.outputs.should_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Tags are needed to tell an already-released version from a new one.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Fetch packaging tooling
+        uses: actions/checkout@v4
+        with:
+          repository: apius-tech/splunk-app-ci
+          ref: main
+          path: .splunk-app-ci
+
+      - name: Resolve version and decide whether to release
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          APP_ID: ${{ inputs.app_id }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+            echo "Version from caller input: $version"
+          else
+            version="$(PYTHONPATH=.splunk-app-ci python -m splunk_app_ci current-version \
+              --app-conf "${APP_ID}/default/app.conf")"
+            echo "Version read from ${APP_ID}/default/app.conf: $version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            echo "Tag-triggered run — releasing v${version}."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "v${version} is already tagged — nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v${version} has no tag yet — releasing."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.should_release == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -115,7 +191,7 @@ jobs:
         run: >
           PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package
           --app-dir "${{ inputs.app_id }}"
-          --version "${{ inputs.version }}"
+          --version "${{ needs.resolve.outputs.version }}"
           --dest dist
 
       # Base (non-cloud) vetting. failOnError is hardcoded true in the action,
@@ -156,16 +232,35 @@ jobs:
           path: AppInspect_response.html
           if-no-files-found: warn
 
-      # Publish the GitHub Release for the pushed tag with the packaged
-      # artifact and auto-generated notes. Reached only when the base checks
-      # (and, under cloud_gate, cloud checks) passed.
-      - name: Create GitHub Release
+      # Hand the inspected bytes to the Splunkbase job instead of having it
+      # rebuild. build_package normalizes ownership but tarfile's gzip header
+      # carries a fresh mtime, so a rebuild is not byte-identical: promoting
+      # this artifact is what makes the published package provably the one that
+      # passed AppInspect.
+      - name: Upload release package for promotion
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      # Publish the GitHub Release with the packaged artifact and auto-generated
+      # notes. Reached only when the base checks (and, under cloud_gate, cloud
+      # checks) passed.
+      #
+      # --target creates the tag when it does not exist yet, which is what makes
+      # the auto trigger work without a second push event: a tag pushed by
+      # GITHUB_TOKEN would not trigger `on: push: tags` at all, so the tag is
+      # minted here rather than pushed from a job. On a tag-triggered run the tag
+      # already points at this commit and --target is a no-op.
+      - name: Create GitHub Release (creates the tag when absent)
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create "v${{ inputs.version }}"
+          gh release create "v${{ needs.resolve.outputs.version }}"
           dist/*.tar.gz
-          --title "v${{ inputs.version }}"
+          --target "${{ github.sha }}"
+          --title "v${{ needs.resolve.outputs.version }}"
           --generate-notes
 
   # Gated Splunkbase publish (ADR-0006, slice #6). Runs only after the GitHub
@@ -183,7 +278,7 @@ jobs:
   # empty. Only the read-only status poll loops; the upload POSTs exactly once
   # to respect the Release API limit of <=20 POST/hour.
   splunkbase:
-    needs: release
+    needs: [resolve, release]
     if: ${{ inputs.splunkbase_app_id != '' }}
     runs-on: ubuntu-latest
     environment: splunkbase
@@ -195,30 +290,16 @@ jobs:
             echo "Create the Splunkbase listing manually, then set the SPLUNKBASE_APP_ID repo variable."
             exit 1
           fi
-          echo "Publishing ${{ inputs.app_id }}-${{ inputs.version }} to Splunkbase app id ${{ inputs.splunkbase_app_id }} (pending environment approval)."
+          echo "Publishing ${{ inputs.app_id }}-${{ needs.resolve.outputs.version }} to Splunkbase app id ${{ inputs.splunkbase_app_id }} (pending environment approval)."
 
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # Promote the exact artifact the release job inspected and attached to the
+      # GitHub Release — no rebuild, so the published bytes cannot drift from the
+      # inspected ones.
+      - name: Download the released package
+        uses: actions/download-artifact@v4
         with:
-          python-version: ${{ inputs.python_version }}
-
-      - name: Fetch packaging tooling
-        uses: actions/checkout@v4
-        with:
-          repository: apius-tech/splunk-app-ci
-          ref: main
-          path: .splunk-app-ci
-
-      # Rebuild the exact same Splunkbase artifact the GitHub Release job built.
-      - name: Build package
-        run: >
-          PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package
-          --app-dir "${{ inputs.app_id }}"
-          --version "${{ inputs.version }}"
-          --dest dist
+          name: release-package
+          path: dist
 
       # Upload via the Splunkbase Release API (new_release) with HTTP Basic auth,
       # then poll the package status endpoint until it reports pass/fail.
@@ -228,7 +309,7 @@ jobs:
           SPLUNK_PASS: ${{ secrets.SPLUNK_PASS }}
           SB_APP_ID: ${{ inputs.splunkbase_app_id }}
           APP_ID: ${{ inputs.app_id }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
           SPLUNK_VERSIONS: ${{ inputs.splunk_versions }}
           CIM_VERSIONS: ${{ inputs.cim_versions }}
           VISIBILITY: ${{ inputs.visibility }}

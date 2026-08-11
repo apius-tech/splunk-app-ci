@@ -49,3 +49,14 @@ def test_cli_stamp_syncs_app_conf_and_pyproject(tmp_path):
     assert rc == 0
     assert "version = 2.3.4\n" in conf.read_text()
     assert 'version = "2.3.4"\n' in pyproject.read_text()
+
+
+def test_cli_current_version_prints_stamped_version(tmp_path, capsys):
+    conf = tmp_path / "app.conf"
+    conf.write_text(_app_conf())
+
+    rc = main(["current-version", "--app-conf", str(conf)])
+
+    assert rc == 0
+    # bare value on stdout: the release workflow captures this in a shell $( )
+    assert capsys.readouterr().out == "1.0.0\n"

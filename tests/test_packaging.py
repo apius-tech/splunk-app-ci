@@ -4,6 +4,7 @@ import pytest
 
 from splunk_app_ci.packaging import (
     build_package,
+    read_conf_version,
     stamp_conf_version,
     stamp_pyproject_version,
 )
@@ -93,3 +94,18 @@ def test_build_package_rejects_dir_without_app_conf(tmp_path):
     (not_an_app / "bin").mkdir(parents=True)
     with pytest.raises(ValueError, match="app.conf"):
         build_package(not_an_app, "1.0.0", tmp_path / "dist")
+
+
+def test_read_conf_version_round_trips_a_stamp():
+    conf = (
+        "[launcher]\nauthor = Apius Technologies\nversion = 1.0.0\n"
+        "\n[package]\nid = apius_lang_entropy\nversion = 9.9.9\n"
+    )
+    # reads the [launcher] version, not a same-named key in another stanza
+    assert read_conf_version(conf) == "1.0.0"
+    assert read_conf_version(stamp_conf_version(conf, "2.3.4")) == "2.3.4"
+
+
+def test_read_conf_version_raises_when_absent():
+    with pytest.raises(ValueError, match="launcher"):
+        read_conf_version("[launcher]\nauthor = Apius Technologies\n")
