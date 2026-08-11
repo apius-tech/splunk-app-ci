@@ -39,6 +39,22 @@ def stamp_conf_version(conf_text, version, stanza="launcher"):
     return "".join(out)
 
 
+def read_conf_version(conf_text, stanza="launcher"):
+    """Return the ``version`` value set inside ``[stanza]`` of app.conf text.
+
+    The inverse of :func:`stamp_conf_version`, sharing its stanza/key parsing so
+    the release flow reads back exactly what prepare-release wrote.
+    """
+    in_stanza = False
+    for line in conf_text.splitlines():
+        match = _STANZA_RE.match(line)
+        if match:
+            in_stanza = match.group("name").strip() == stanza
+        elif in_stanza and _KEY_RE.match(line):
+            return line.split("=", 1)[1].strip()
+    raise ValueError(f"No [{stanza}] version key found to read")
+
+
 def stamp_pyproject_version(pyproject_text, version):
     """Return pyproject.toml text with ``[project].version`` set to ``version``.
 
