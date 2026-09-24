@@ -31,6 +31,80 @@ Inputs:
 - `app_id` (required) — the app id, which is also the app's directory name and
   the AppInspect target.
 - `python_version` (optional, default `3.9`) — Python used for the tooling.
+- `build_command` (optional, default empty) — shell script run from the repo
+  root after lint/tests and before packaging; empty skips the build. See
+  [Built apps (UCC)](#built-apps-ucc).
+- `package_dir` (optional, default empty = `<app_id>`) — directory to package
+  and inspect, e.g. `output/<app_id>`. Its last path component must equal
+  `app_id`.
+
+## Built apps (UCC)
+
+Apps whose Splunk app is generated at build time — UCC add-ons built with
+`ucc-gen build` — opt into a build step in `app-ci.yml` and `release.yml` with
+two inputs. Apps that set neither behave exactly as before: no build, and
+`<app_id>/` is packaged.
+
+- `build_command` — a shell script (`bash -eo pipefail`) run from the repo
+  root before packaging. Its environment carries `APP_ID` and `APP_VERSION`:
+  `0.0.0` in the PR gate, the resolved release version in `release.yml`.
+- `package_dir` — the directory the build produces, which is packaged instead
+  of `<app_id>/`. The workflow fails before packaging unless its last path
+  component equals `app_id` (the tarball's single top-level directory is the
+  app id) and it contains `default/app.conf`.
+
+The version source of truth does not move. `prepare-release` still stamps
+`<app_id>/default/app.conf` and `pyproject.toml`, and `release.yml` still reads
+the version from `<app_id>/default/app.conf` — the **source** app.conf, never
+the build output. For UCC that means using `<app_id>/` as the `--source`
+directory (instead of UCC's default `package/`) and keeping `globalConfig.json`
+at the repo root, which is where `ucc-gen build` looks for it (the parent of
+`--source`):
+
+```
+globalConfig.json
+apius_ta_example/          # ucc-gen --source; prepare-release stamps this app.conf
+  app.manifest
+  default/app.conf         # [launcher] version = X.Y.Z
+  bin/ ...
+  lib/requirements.txt
+output/                    # generated, git-ignored
+```
+
+Caller inputs (both `ci.yml` and `release.yml` callers):
+
+```yaml
+    with:
+      app_id: apius_ta_example
+      build_command: |
+        pip install "splunk-add-on-ucc-framework==6.6.0"
+        ucc-gen build --source "$APP_ID" --ta-version "$APP_VERSION"
+      package_dir: output/apius_ta_example
+```
+
+Verified with UCC 6.6.0 (Python 3.9):
+
+- The flag is `--ta-version`. `--ver` does not exist; argparse
+  prefix-matches it to `--verbose`, so the build fails on the stray version.
+- Without `--ta-version`, UCC derives the version from git
+  (`0.0.0+<sha>`) and ignores the source app.conf, so always pass
+  `$APP_VERSION`.
+- Output lands in `output/<globalConfig meta.name>/`; `meta.name` must be the
+  app id.
+- The source `default/app.conf` is merged, not replaced: comments and custom
+  stanzas survive, `[launcher] version` becomes `--ta-version`. UCC drops
+  `[launcher] author` from app.conf when it differs from `app.manifest`, so
+  set the author in `app.manifest`.
+- `ucc-gen build` rewrites `meta.version` (and `schemaVersion`) in the source
+  `globalConfig.json` in place. Harmless in CI; locally, don't commit that
+  diff. `meta.version` is not a source of truth.
+- UCC installs `lib/requirements.txt` with the `python3` on `PATH`, so vendored
+  compiled wheels match the workflow's `python_version` and the runner's OS.
+
+`package` re-stamps `[launcher] version` from the resolved version anyway, so
+the tarball's version is correct even if the build step gets it wrong; passing
+`$APP_VERSION` keeps UCC's own copies (`app.manifest`, `VERSION`, UI
+`globalConfig.json`) in step with it.
 
 ## Packaging module
 
@@ -66,7 +140,8 @@ each with a thin caller in the app repo:
   the normal PR gate.
 - `.github/workflows/release.yml` (`workflow_call`; inputs `app_id`, `version`
   optional, `cloud_gate` default `false`, `splunk_versions` required,
-  `splunkbase_app_id`; secrets `SPLUNK_USER`/`SPLUNK_PASS`) — packages the app
+  `splunkbase_app_id`, `build_command`/`package_dir` optional (see
+  [Built apps (UCC)](#built-apps-ucc)); secrets `SPLUNK_USER`/`SPLUNK_PASS`) — packages the app
   at the released version, runs Splunk AppInspect via the **AppInspect API**
   (`splunk/appinspect-api-action`), publishes a GitHub Release with the
   `.tar.gz` and auto-generated notes, then promotes that same artifact to

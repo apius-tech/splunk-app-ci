@@ -1,8 +1,13 @@
 name: app-ci
 
 # Reusable PR gate for Apius Splunk apps: ruff lint/format, optional pytest,
-# and Splunk AppInspect (cloud tags) against the app directory. Callers pass
+# and Splunk AppInspect (base checks) against the packaged app. Callers pass
 # their app id (== the app directory name) and, optionally, a Python version.
+#
+# Apps that generate their Splunk app at build time (e.g. UCC add-ons, built
+# with `ucc-gen build`) opt into a build step with `build_command` and point
+# `package_dir` at the generated directory. Callers that set neither get
+# exactly the original behaviour: no build, package `<app_id>/`.
 on:
   workflow_call:
     inputs:
@@ -15,6 +20,23 @@ on:
         required: false
         type: string
         default: "3.9"
+      build_command:
+        description: >-
+          Optional shell script run from the repo root after lint/tests and
+          before packaging, e.g. to generate a UCC add-on. It gets APP_ID and
+          APP_VERSION (0.0.0 in the PR gate) in its environment. Empty (the
+          default) skips the build step.
+        required: false
+        type: string
+        default: ""
+      package_dir:
+        description: >-
+          Optional path of the directory to package and inspect, e.g.
+          output/<app_id> for UCC. Its last path component must equal app_id.
+          Empty (the default) packages <app_id>/.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   pr-gate:
@@ -57,8 +79,43 @@ jobs:
           ref: main
           path: .splunk-app-ci
 
+      # Optional app build (opt-in via build_command). Runs after lint/tests so
+      # generated output is never linted. APP_VERSION is the same placeholder
+      # the throwaway package is stamped with.
+      - name: Build app
+        if: ${{ inputs.build_command != '' }}
+        shell: bash
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_VERSION: 0.0.0
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: bash -eo pipefail -c "$BUILD_COMMAND"
+
+      # Pick the directory to package (package_dir, else <app_id>) and enforce
+      # the ADR-0003 invariant: the tarball's single top-level directory, which
+      # build_package takes from the directory name, must be the app id.
+      - name: Resolve package directory
+        id: pkg
+        shell: bash
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          PACKAGE_DIR: ${{ inputs.package_dir }}
+        run: |
+          set -euo pipefail
+          dir="${PACKAGE_DIR:-$APP_ID}"
+          dir="${dir%/}"
+          if [ "$(basename "$dir")" != "$APP_ID" ]; then
+            echo "::error::package_dir '$dir' must be a directory named after app_id '$APP_ID' (the package's top-level directory is the app id)."
+            exit 1
+          fi
+          if [ ! -f "$dir/default/app.conf" ]; then
+            echo "::error::'$dir/default/app.conf' not found. Is app_id/package_dir right, and did build_command produce the app?"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Build package for inspection
-        run: PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package --app-dir "${{ inputs.app_id }}" --version 0.0.0 --dest dist
+        run: PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package --app-dir "${{ steps.pkg.outputs.dir }}" --version 0.0.0 --dest dist
 
       # This is the fast base-check PR gate: standard checks run and block on
       # errors/failures. Cloud vetting is a release-time API concern (advisory)

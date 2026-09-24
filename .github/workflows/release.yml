@@ -25,6 +25,13 @@ name: release
 # approval gate. It is skipped entirely when `splunkbase_app_id` is empty (no
 # listing yet) so the pipeline stays green and the first publish stays manual.
 #
+# Built apps (e.g. UCC add-ons) opt in with `build_command` + `package_dir`:
+# the build runs before packaging with APP_VERSION set to the resolved release
+# version, and the generated directory is packaged instead of `<app_id>/`. The
+# version is still resolved from the SOURCE `<app_id>/default/app.conf` (what
+# prepare-release stamps), so the release flow is unchanged for built apps.
+# Callers that set neither input get the original behaviour.
+#
 # Human release flow, auto trigger (see also prepare-release.yml):
 #   1. Dispatch prepare-release with the target version.
 #   2. Merge the "Release vX.Y.Z" PR -> this workflow runs, tags, releases.
@@ -55,6 +62,24 @@ on:
         required: false
         type: string
         default: "3.9"
+      build_command:
+        description: >-
+          Optional shell script run from the repo root before packaging, e.g.
+          to generate a UCC add-on. It gets APP_ID and APP_VERSION (the
+          resolved release version) in its environment. Empty (the default)
+          skips the build step.
+        required: false
+        type: string
+        default: ""
+      package_dir:
+        description: >-
+          Optional path of the directory to package, e.g. output/<app_id> for
+          UCC. Its last path component must equal app_id. Empty (the default)
+          packages <app_id>/. The version is always read from
+          <app_id>/default/app.conf, not from this directory.
+        required: false
+        type: string
+        default: ""
       splunkbase_app_id:
         description: >-
           Numeric Splunkbase app id (listing) to publish to. Empty (the
@@ -184,13 +209,46 @@ jobs:
           ref: main
           path: .splunk-app-ci
 
+      # Optional app build (opt-in via build_command), at the released version.
+      - name: Build app
+        if: ${{ inputs.build_command != '' }}
+        shell: bash
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: bash -eo pipefail -c "$BUILD_COMMAND"
+
+      # Pick the directory to package (package_dir, else <app_id>) and enforce
+      # the ADR-0003 invariant: the tarball's single top-level directory, which
+      # build_package takes from the directory name, must be the app id.
+      - name: Resolve package directory
+        id: pkg
+        shell: bash
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          PACKAGE_DIR: ${{ inputs.package_dir }}
+        run: |
+          set -euo pipefail
+          dir="${PACKAGE_DIR:-$APP_ID}"
+          dir="${dir%/}"
+          if [ "$(basename "$dir")" != "$APP_ID" ]; then
+            echo "::error::package_dir '$dir' must be a directory named after app_id '$APP_ID' (the package's top-level directory is the app id)."
+            exit 1
+          fi
+          if [ ! -f "$dir/default/app.conf" ]; then
+            echo "::error::'$dir/default/app.conf' not found. Is app_id/package_dir right, and did build_command produce the app?"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       # Build the Splunkbase artifact at the released version into dist/. The
       # AppInspect API action globs the directory, so dist/ holds only this
       # single tarball.
       - name: Build package
         run: >
           PYTHONPATH=.splunk-app-ci python -m splunk_app_ci package
-          --app-dir "${{ inputs.app_id }}"
+          --app-dir "${{ steps.pkg.outputs.dir }}"
           --version "${{ needs.resolve.outputs.version }}"
           --dest dist
 
