@@ -37,6 +37,11 @@ Inputs:
 - `package_dir` (optional, default empty = `<app_id>`) — directory to package
   and inspect, e.g. `output/<app_id>`. Its last path component must equal
   `app_id`.
+- `test_requirements` (optional, default empty) — path, relative to the repo
+  root, of a pip requirements file installed (`pip install -r`) after the
+  ruff/pytest tooling and before lint/tests. Use it when the app's tests import
+  third-party packages. The gate fails if the file is missing; empty installs
+  nothing extra. PR gate only (`release.yml` runs no tests).
 
 ## Built apps (UCC)
 
@@ -71,7 +76,9 @@ apius_ta_example/          # ucc-gen --source; prepare-release stamps this app.c
 output/                    # generated, git-ignored
 ```
 
-Caller inputs (both `ci.yml` and `release.yml` callers):
+Caller inputs (both `ci.yml` and `release.yml` callers; `test_requirements`
+goes in the `ci.yml` caller only, since `release.yml` runs no tests and does
+not accept it):
 
 ```yaml
     with:
@@ -80,6 +87,7 @@ Caller inputs (both `ci.yml` and `release.yml` callers):
         pip install "splunk-add-on-ucc-framework==6.6.0"
         ucc-gen build --source "$APP_ID" --ta-version "$APP_VERSION"
       package_dir: output/apius_ta_example
+      test_requirements: requirements-dev.txt  # ci.yml caller only
 ```
 
 Verified with UCC 6.6.0 (Python 3.9):

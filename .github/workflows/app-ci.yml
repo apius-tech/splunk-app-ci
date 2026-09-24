@@ -8,6 +8,10 @@ name: app-ci
 # with `ucc-gen build`) opt into a build step with `build_command` and point
 # `package_dir` at the generated directory. Callers that set neither get
 # exactly the original behaviour: no build, package `<app_id>/`.
+#
+# Apps whose tests need third-party packages list them in a pip requirements
+# file and pass its path as `test_requirements`. Empty (the default) installs
+# only the ruff/pytest tooling, as before.
 on:
   workflow_call:
     inputs:
@@ -37,6 +41,14 @@ on:
         required: false
         type: string
         default: ""
+      test_requirements:
+        description: >-
+          Optional path, relative to the repo root, of a pip requirements file
+          installed after the ruff/pytest tooling and before lint/tests, e.g.
+          requirements-dev.txt. Empty (the default) installs nothing extra.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   pr-gate:
@@ -52,6 +64,19 @@ jobs:
 
       - name: Install tooling
         run: pip install "ruff==0.15.21" "pytest>=8"
+
+      - name: Install test requirements
+        if: ${{ inputs.test_requirements != '' }}
+        shell: bash
+        env:
+          TEST_REQUIREMENTS: ${{ inputs.test_requirements }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$TEST_REQUIREMENTS" ]; then
+            echo "::error::test_requirements file '$TEST_REQUIREMENTS' not found (path is relative to the repo root)."
+            exit 1
+          fi
+          pip install -r "$TEST_REQUIREMENTS"
 
       - name: Ruff lint
         run: ruff check .
