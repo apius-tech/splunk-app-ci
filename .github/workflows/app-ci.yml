@@ -12,6 +12,9 @@ name: app-ci
 # Apps whose tests need third-party packages list them in a pip requirements
 # file and pass its path as `test_requirements`. Empty (the default) installs
 # only the ruff/pytest tooling, as before.
+#
+# Every job runs on `runner` (default ubuntu-24.04; see the README for why it
+# is pinned). Override it only with a Linux label.
 on:
   workflow_call:
     inputs:
@@ -24,6 +27,11 @@ on:
         required: false
         type: string
         default: "3.9"
+      runner:
+        description: "GitHub-hosted Linux runner label used by every job (the steps use bash and setup-python)."
+        required: false
+        type: string
+        default: "ubuntu-24.04"
       build_command:
         description: >-
           Optional shell script run from the repo root after lint/tests and
@@ -50,9 +58,12 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
   pr-gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
