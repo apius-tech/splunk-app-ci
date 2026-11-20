@@ -31,10 +31,11 @@ Inputs:
 - `app_id` (required) — the app id, which is also the app's directory name and
   the AppInspect target.
 - `python_version` (optional, default `3.9`) — Python used for the tooling.
-- `runner` (optional, default `ubuntu-24.04`) — runner label for every job.
-  Pinned instead of `ubuntu-latest`, which now resolves to `ubuntu-26.04` and
-  has no Python 3.9 build. Also accepted by `release.yml` and
-  `prepare-release.yml`.
+- `runner` (optional, default `ubuntu-24.04`) — GitHub-hosted Linux runner
+  label used by every job; also accepted by `release.yml` and
+  `prepare-release.yml`. It is pinned because `ubuntu-latest` moved to
+  `ubuntu-26.04` in November 2026, and that image has no Python 3.9 build
+  (INT-371).
 - `build_command` (optional, default empty) — shell script run from the repo
   root after lint/tests and before packaging; empty skips the build. See
   [Built apps (UCC)](#built-apps-ucc).
@@ -146,16 +147,17 @@ Two reusable workflows implement the commit-back release-PR flow (ADR-0004),
 each with a thin caller in the app repo:
 
 - `.github/workflows/prepare-release.yml` (`workflow_call`; inputs `version`,
-  `app_id`; optional `python_version`, `runner`) — stamps `app.conf [launcher] version` and root `pyproject.toml
-  [project].version` to `version` on a `release/vX.Y.Z` branch and opens a
-  "Release vX.Y.Z" PR. It never writes to main directly; opening the PR runs
-  the normal PR gate.
+  `app_id`; optional `python_version`, `runner`) — stamps `app.conf [launcher]
+  version` and root `pyproject.toml [project].version` to `version` on a
+  `release/vX.Y.Z` branch and opens a "Release vX.Y.Z" PR. It never writes to
+  main directly; opening the PR runs the normal PR gate.
 - `.github/workflows/release.yml` (`workflow_call`; inputs `app_id`, `version`
   optional, `cloud_gate` default `false`, `splunk_versions` required,
-  `splunkbase_app_id`, `python_version`, `runner`, `build_command`/`package_dir` optional (see
-  [Built apps (UCC)](#built-apps-ucc)); secrets `SPLUNK_USER`/`SPLUNK_PASS`) — packages the app
-  at the released version, runs Splunk AppInspect via the **AppInspect API**
-  (`splunk/appinspect-api-action`), publishes a GitHub Release with the
+  `splunkbase_app_id`, `python_version`, `runner`,
+  `build_command`/`package_dir` optional (see [Built apps
+  (UCC)](#built-apps-ucc)); secrets `SPLUNK_USER`/`SPLUNK_PASS`) — packages the
+  app at the released version, runs Splunk AppInspect via the **AppInspect
+  API** (`splunk/appinspect-api-action`), publishes a GitHub Release with the
   `.tar.gz` and auto-generated notes, then promotes that same artifact to
   Splunkbase behind the caller's `splunkbase` Environment approval (ADR-0006).
   Base (non-cloud) errors/failures block; cloud findings are advisory unless

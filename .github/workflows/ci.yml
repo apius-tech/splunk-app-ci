@@ -7,7 +7,7 @@ on:
 
 jobs:
   lint-and-test:
-    # Pinned: ubuntu-latest (26.04) has no Python 3.9 build.
+    # Pinned to ubuntu-24.04; see the README (INT-371).
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

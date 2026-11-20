@@ -12,6 +12,9 @@ name: app-ci
 # Apps whose tests need third-party packages list them in a pip requirements
 # file and pass its path as `test_requirements`. Empty (the default) installs
 # only the ruff/pytest tooling, as before.
+#
+# Every job runs on `runner` (default ubuntu-24.04; see the README for why it
+# is pinned). Override it only with a Linux label.
 on:
   workflow_call:
     inputs:
@@ -25,10 +28,7 @@ on:
         type: string
         default: "3.9"
       runner:
-        description: >-
-          GitHub-hosted runner label for every job. Pinned to ubuntu-24.04
-          rather than ubuntu-latest: ubuntu-latest now resolves to
-          ubuntu-26.04, which has no Python 3.9 build for setup-python.
+        description: "GitHub-hosted Linux runner label used by every job (the steps use bash and setup-python)."
         required: false
         type: string
         default: "ubuntu-24.04"
