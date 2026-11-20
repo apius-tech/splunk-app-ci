@@ -58,6 +58,9 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
   pr-gate:
     runs-on: ${{ inputs.runner }}
