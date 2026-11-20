@@ -24,6 +24,14 @@ on:
         required: false
         type: string
         default: "3.9"
+      runner:
+        description: >-
+          GitHub-hosted runner label for every job. Pinned to ubuntu-24.04
+          rather than ubuntu-latest: ubuntu-latest now resolves to
+          ubuntu-26.04, which has no Python 3.9 build for setup-python.
+        required: false
+        type: string
+        default: "ubuntu-24.04"
       build_command:
         description: >-
           Optional shell script run from the repo root after lint/tests and
@@ -52,7 +60,7 @@ on:
 
 jobs:
   pr-gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
